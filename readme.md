@@ -1,5 +1,7 @@
 # Personal fork: Shift to move
 
+**Shift Move Refresh Rate** selects 60 or 120 Hz (default). Mouse input is coalesced to the latest position each tick; releasing Shift flushes the final target. No easing or animation lag is added.
+
 Hold Shift while the pointer is over a window, then move the mouse without clicking. Release Shift to stop. The window stays anchored to the initial pointer offset. Other modifiers and mouse buttons cancel the gesture. App exclusions and Bring Window to Front are respected. Toggle **Hold Shift to Move (No Click)** in the menu to disable it. Shift continues to reach applications, so disable this option when using Shift for selection or games.
 
 # ![icon](easy-move-resize/Images.xcassets/AppIcon.appiconset/icon_32x32.png) Easy Move+Resize

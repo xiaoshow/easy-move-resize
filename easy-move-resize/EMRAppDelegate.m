@@ -18,8 +18,29 @@ float getMinRefreshInterval(void) {
 static AXUIElementRef shiftWindow = NULL;
 static CGPoint shiftMouseOrigin;
 static CGPoint shiftWindowOrigin;
+static CGPoint shiftPendingPosition;
+static BOOL shiftPositionDirty = NO;
+static NSTimer *shiftUpdateTimer;
+
+static void flushShiftPosition(void) {
+    if (shiftWindow == NULL || !shiftPositionDirty) return;
+    shiftPositionDirty = NO;
+    AXValueRef value = AXValueCreate(kAXValueCGPointType, &shiftPendingPosition);
+    AXError result = AXUIElementSetAttributeValue(shiftWindow, kAXPositionAttribute, value);
+    CFRelease(value);
+    if (result != kAXErrorSuccess) {
+        [shiftUpdateTimer invalidate];
+        shiftUpdateTimer = nil;
+        CFRelease(shiftWindow);
+        shiftWindow = NULL;
+    }
+}
 
 static void stopShiftDrag(void) {
+    [shiftUpdateTimer invalidate];
+    shiftUpdateTimer = nil;
+    flushShiftPosition();
+    shiftPositionDirty = NO;
     if (shiftWindow != NULL) CFRelease(shiftWindow);
     shiftWindow = NULL;
 }
@@ -68,6 +89,14 @@ static void handleShiftDrag(EMRAppDelegate *delegate, CGEventType type, CGEventR
             CFGetTypeID(position) == AXValueGetTypeID() && AXValueGetValue(position, kAXValueCGPointType, &shiftWindowOrigin)) {
             shiftWindow = (AXUIElementRef)CFRetain(window);
             shiftMouseOrigin = mouse;
+            // Mouse events only replace the target; never queue stale positions.
+            NSInteger hz = [[NSUserDefaults standardUserDefaults] integerForKey:@"ShiftMoveRefreshRate"];
+            if (hz != 60 && hz != 120) hz = 120;
+            shiftUpdateTimer = [NSTimer timerWithTimeInterval:1.0 / hz repeats:YES block:^(NSTimer *timer) {
+                flushShiftPosition();
+            }];
+            shiftUpdateTimer.tolerance = 0;
+            [[NSRunLoop mainRunLoop] addTimer:shiftUpdateTimer forMode:NSRunLoopCommonModes];
             [delegate setMostRecentApp:app];
             if ([delegate shouldBringWindowToFront]) {
                 [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
@@ -78,12 +107,9 @@ static void handleShiftDrag(EMRAppDelegate *delegate, CGEventType type, CGEventR
         CFRelease(window);
     }
     if (shiftWindow != NULL && type == kCGEventMouseMoved) {
-        CGPoint position = CGPointMake(shiftWindowOrigin.x + mouse.x - shiftMouseOrigin.x,
-                                       shiftWindowOrigin.y + mouse.y - shiftMouseOrigin.y);
-        AXValueRef value = AXValueCreate(kAXValueCGPointType, &position);
-        AXError result = AXUIElementSetAttributeValue(shiftWindow, kAXPositionAttribute, value);
-        CFRelease(value);
-        if (result != kAXErrorSuccess) stopShiftDrag();
+        shiftPendingPosition = CGPointMake(shiftWindowOrigin.x + mouse.x - shiftMouseOrigin.x,
+                                           shiftWindowOrigin.y + mouse.y - shiftMouseOrigin.y);
+        shiftPositionDirty = YES;
     }
 }
 
@@ -467,12 +493,34 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
     NSImage *icon = [NSImage imageNamed:@"MenuIcon"];
     statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     [statusItem setMenu:statusMenu];
+    icon.template = YES;
     statusItem.button.image = icon;
+    statusItem.button.title = @"⇧拖动";
+    statusItem.button.toolTip = @"Shift 拖动：按住 Shift 移动窗口，点击此处设置";
     NSMenuItem *shiftMove = [[NSMenuItem alloc] initWithTitle:@"Hold Shift to Move (No Click)" action:@selector(toggleShiftHoverMove:) keyEquivalent:@""];
     shiftMove.state = ![[NSUserDefaults standardUserDefaults] boolForKey:@"ShiftHoverMoveDisabled"];
     [statusMenu insertItem:shiftMove atIndex:1];
+    NSMenuItem *rateMenu = [[NSMenuItem alloc] initWithTitle:@"Shift Move Refresh Rate" action:nil keyEquivalent:@""];
+    NSMenu *rates = [[NSMenu alloc] init];
+    NSInteger currentRate = [[NSUserDefaults standardUserDefaults] integerForKey:@"ShiftMoveRefreshRate"];
+    if (currentRate != 60 && currentRate != 120) currentRate = 120;
+    for (NSNumber *rate in @[@60, @120]) {
+        NSMenuItem *item = [rates addItemWithTitle:[NSString stringWithFormat:@"%@ Hz", rate] action:@selector(setShiftMoveRefreshRate:) keyEquivalent:@""];
+        item.tag = rate.integerValue;
+        item.state = item.tag == currentRate ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    rateMenu.submenu = rates;
+    [statusMenu insertItem:rateMenu atIndex:2];
     [statusMenu setAutoenablesItems:NO];
     [[statusMenu itemAtIndex:0] setEnabled:NO];
+}
+
+- (void)setShiftMoveRefreshRate:(NSMenuItem *)sender {
+    stopShiftDrag();
+    [[NSUserDefaults standardUserDefaults] setInteger:sender.tag forKey:@"ShiftMoveRefreshRate"];
+    for (NSMenuItem *item in sender.menu.itemArray) {
+        item.state = item == sender ? NSControlStateValueOn : NSControlStateValueOff;
+    }
 }
 
 - (void)toggleShiftHoverMove:(NSMenuItem *)sender {
