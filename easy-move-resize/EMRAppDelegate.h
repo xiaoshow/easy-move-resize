@@ -8,6 +8,9 @@
 }
 
 - (int)modifierFlags;
+- (NSDictionary *)getDisabledApps;
+- (void)setMostRecentApp:(NSRunningApplication *)app;
+- (BOOL)shouldBringWindowToFront;
 
 - (void)initMenuItems;
 - (IBAction)modifierToggle:(id)sender;

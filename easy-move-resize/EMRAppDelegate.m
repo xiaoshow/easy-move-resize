@@ -14,6 +14,79 @@ float getMinRefreshInterval(void) {
     return minInterval;
 }
 
+// A separate gesture keeps button-free movement independent of click-to-resize.
+static AXUIElementRef shiftWindow = NULL;
+static CGPoint shiftMouseOrigin;
+static CGPoint shiftWindowOrigin;
+
+static void stopShiftDrag(void) {
+    if (shiftWindow != NULL) CFRelease(shiftWindow);
+    shiftWindow = NULL;
+}
+
+static BOOL shiftOnly(CGEventFlags flags) {
+    CGEventFlags modifiers = kCGEventFlagMaskShift | kCGEventFlagMaskCommand |
+        kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskSecondaryFn;
+    return (flags & modifiers) == kCGEventFlagMaskShift;
+}
+
+static void handleShiftDrag(EMRAppDelegate *delegate, CGEventType type, CGEventRef event) {
+    if (type != kCGEventFlagsChanged && type != kCGEventMouseMoved) return;
+    BOOL enabled = ![[NSUserDefaults standardUserDefaults] boolForKey:@"ShiftHoverMoveDisabled"];
+    if (!enabled || !delegate.sessionActive || !shiftOnly(CGEventGetFlags(event)) ||
+        CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft) ||
+        CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonRight) ||
+        CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonCenter)) {
+        stopShiftDrag();
+        return;
+    }
+    CGPoint mouse = CGEventGetLocation(event);
+    // Only start on a Shift key transition; never acquire another window mid-gesture.
+    if (type == kCGEventFlagsChanged && shiftWindow == NULL) {
+        AXUIElementRef system = AXUIElementCreateSystemWide();
+        AXUIElementRef element = NULL;
+        CFTypeRef window = NULL;
+        if (AXUIElementCopyElementAtPosition(system, mouse.x, mouse.y, &element) == kAXErrorSuccess && element) {
+            CFTypeRef role = NULL;
+            if (AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role) == kAXErrorSuccess) {
+                if (CFEqual(role, kAXWindowRole)) window = CFRetain(element);
+                CFRelease(role);
+            }
+            if (window == NULL) AXUIElementCopyAttributeValue(element, kAXWindowAttribute, &window);
+            CFRelease(element);
+        }
+        CFRelease(system);
+        if (window == NULL) return;
+        pid_t pid = 0;
+        AXUIElementGetPid((AXUIElementRef)window, &pid);
+        NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        CFTypeRef position = NULL;
+        Boolean settable = false;
+        BOOL allowed = app.bundleIdentifier != nil && [delegate getDisabledApps][app.bundleIdentifier] == nil;
+        if (allowed && AXUIElementIsAttributeSettable((AXUIElementRef)window, kAXPositionAttribute, &settable) == kAXErrorSuccess && settable &&
+            AXUIElementCopyAttributeValue((AXUIElementRef)window, kAXPositionAttribute, &position) == kAXErrorSuccess &&
+            CFGetTypeID(position) == AXValueGetTypeID() && AXValueGetValue(position, kAXValueCGPointType, &shiftWindowOrigin)) {
+            shiftWindow = (AXUIElementRef)CFRetain(window);
+            shiftMouseOrigin = mouse;
+            [delegate setMostRecentApp:app];
+            if ([delegate shouldBringWindowToFront]) {
+                [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+                AXUIElementPerformAction(shiftWindow, kAXRaiseAction);
+            }
+        }
+        if (position) CFRelease(position);
+        CFRelease(window);
+    }
+    if (shiftWindow != NULL && type == kCGEventMouseMoved) {
+        CGPoint position = CGPointMake(shiftWindowOrigin.x + mouse.x - shiftMouseOrigin.x,
+                                       shiftWindowOrigin.y + mouse.y - shiftMouseOrigin.y);
+        AXValueRef value = AXValueCreate(kAXValueCGPointType, &position);
+        AXError result = AXUIElementSetAttributeValue(shiftWindow, kAXPositionAttribute, value);
+        CFRelease(value);
+        if (result != kAXErrorSuccess) stopShiftDrag();
+    }
+}
+
 @implementation EMRAppDelegate {
     EMRPreferences *preferences;
 }
@@ -35,6 +108,14 @@ float getMinRefreshInterval(void) {
 CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, CGEventRef event, void *refcon) {
 
     EMRAppDelegate *ourDelegate = (__bridge EMRAppDelegate*)refcon;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        stopShiftDrag();
+        CGEventTapEnable([[EMRMoveResize instance] eventTap], true);
+        return event;
+    }
+    handleShiftDrag(ourDelegate, type, event);
+    if (type == kCGEventFlagsChanged || type == kCGEventMouseMoved) return event;
+    stopShiftDrag();
     int keyModifierFlags = [ourDelegate modifierFlags];
     bool shouldMiddleClickResize = [ourDelegate shouldMiddleClickResize];
     bool resizeOnly = [ourDelegate resizeOnly];
@@ -60,12 +141,6 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
     
     EMRMoveResize* moveResize = [EMRMoveResize instance];
 
-    if ((type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput)) {
-        // need to re-enable our eventTap (We got disabled.  Usually happens on a slow resizing app)
-        CGEventTapEnable([moveResize eventTap], true);
-        return event;
-    }
-    
     CGEventFlags flags = CGEventGetFlags(event);
     if ((flags & (keyModifierFlags)) != (keyModifierFlags)) {
         // didn't find our expected modifiers; this event isn't for us
@@ -329,7 +404,9 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
     
     CFRunLoopSourceRef runLoopSource;
 
-    CGEventMask eventMask = CGEventMaskBit( kCGEventLeftMouseDown )
+    CGEventMask eventMask = CGEventMaskBit(kCGEventFlagsChanged)
+                    | CGEventMaskBit(kCGEventMouseMoved)
+                    | CGEventMaskBit( kCGEventLeftMouseDown )
                     | CGEventMaskBit( kCGEventRightMouseDown )
                     | CGEventMaskBit( kCGEventOtherMouseDown )
                     | CGEventMaskBit( kCGEventLeftMouseDragged )
@@ -382,6 +459,7 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
 }
 
 - (void)becameInactive:(NSNotification*) notification {
+    stopShiftDrag();
     _sessionActive = false;
 }
 
@@ -389,9 +467,18 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
     NSImage *icon = [NSImage imageNamed:@"MenuIcon"];
     statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     [statusItem setMenu:statusMenu];
-    [statusItem setImage:icon];
+    statusItem.button.image = icon;
+    NSMenuItem *shiftMove = [[NSMenuItem alloc] initWithTitle:@"Hold Shift to Move (No Click)" action:@selector(toggleShiftHoverMove:) keyEquivalent:@""];
+    shiftMove.state = ![[NSUserDefaults standardUserDefaults] boolForKey:@"ShiftHoverMoveDisabled"];
+    [statusMenu insertItem:shiftMove atIndex:1];
     [statusMenu setAutoenablesItems:NO];
     [[statusMenu itemAtIndex:0] setEnabled:NO];
+}
+
+- (void)toggleShiftHoverMove:(NSMenuItem *)sender {
+    sender.state = sender.state == NSControlStateValueOn ? NSControlStateValueOff : NSControlStateValueOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sender.state == NSControlStateValueOff forKey:@"ShiftHoverMoveDisabled"];
+    stopShiftDrag();
 }
 
 - (void)enableRunLoopSource:(EMRMoveResize*)moveResize {
@@ -400,6 +487,7 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
 }
 
 - (void)disableRunLoopSource:(EMRMoveResize*)moveResize {
+    stopShiftDrag();
     CGEventTapEnable([moveResize eventTap], false);
     CFRunLoopRemoveSource(CFRunLoopGetCurrent(), [moveResize runLoopSource], kCFRunLoopCommonModes);
 }
