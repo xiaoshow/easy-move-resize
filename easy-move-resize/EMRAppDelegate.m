@@ -88,32 +88,40 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
         AXUIElementRef _clickedWindow = NULL;
         _systemWideElement = AXUIElementCreateSystemWide();
 
-        AXUIElementRef _element;
+        AXUIElementRef _element = NULL;
         if ((AXUIElementCopyElementAtPosition(_systemWideElement, (float) mouseLocation.x, (float) mouseLocation.y, &_element) == kAXErrorSuccess) && _element) {
             CFTypeRef _role;
             if (AXUIElementCopyAttributeValue(_element, (__bridge CFStringRef)NSAccessibilityRoleAttribute, &_role) == kAXErrorSuccess) {
                 if ([(__bridge NSString *)_role isEqualToString:NSAccessibilityWindowRole]) {
-                    _clickedWindow = _element;
+                    _clickedWindow = (AXUIElementRef)CFRetain(_element);
                 }
                 if (_role != NULL) CFRelease(_role);
             }
             CFTypeRef _window;
             if (AXUIElementCopyAttributeValue(_element, (__bridge CFStringRef)NSAccessibilityWindowAttribute, &_window) == kAXErrorSuccess) {
-                if (_element != NULL) CFRelease(_element);
+                if (_clickedWindow != NULL) CFRelease(_clickedWindow);
                 _clickedWindow = (AXUIElementRef)_window;
             }
         }
+        if (_element != NULL) CFRelease(_element);
         CFRelease(_systemWideElement);
+
+        if (_clickedWindow == NULL) {
+            [moveResize setTracking:0];
+            [moveResize setWindow:NULL];
+            return event;
+        }
         
         pid_t PID;
-        NSRunningApplication* app;
+        NSRunningApplication* app = nil;
         if(!AXUIElementGetPid(_clickedWindow, &PID)) {
             app = [NSRunningApplication runningApplicationWithProcessIdentifier:PID];
-            if ([[ourDelegate getDisabledApps] objectForKey:[app bundleIdentifier]] != nil) {
+            if (app.bundleIdentifier != nil && [[ourDelegate getDisabledApps] objectForKey:app.bundleIdentifier] != nil) {
                 [moveResize setTracking:0];
+                CFRelease(_clickedWindow);
                 return event;
             }
-            [ourDelegate setMostRecentApp:app];
+            if (app.bundleIdentifier != nil) [ourDelegate setMostRecentApp:app];
         }
 
         if([ourDelegate shouldBringWindowToFront]){
@@ -124,13 +132,20 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
         }
         
         CFTypeRef _cPosition = nil;
-        NSPoint cTopLeft;
+        NSPoint cTopLeft = NSZeroPoint;
         if (AXUIElementCopyAttributeValue((AXUIElementRef)_clickedWindow, (__bridge CFStringRef)NSAccessibilityPositionAttribute, &_cPosition) == kAXErrorSuccess) {
             if (!AXValueGetValue(_cPosition, kAXValueCGPointType, (void *)&cTopLeft)) {
                 NSLog(@"ERROR: Could not decode position");
-                cTopLeft = NSMakePoint(0, 0);
+                CFRelease(_cPosition);
+                CFRelease(_clickedWindow);
+                [moveResize setTracking:0];
+                return event;
             }
             CFRelease(_cPosition);
+        } else {
+            CFRelease(_clickedWindow);
+            [moveResize setTracking:0];
+            return event;
         }
         
         cTopLeft.x = (int) cTopLeft.x;
@@ -178,12 +193,15 @@ CGEventRef myCGEventCallback(CGEventTapProxy __unused proxy, CGEventType type, C
         clickPoint.x -= cTopLeft.x;
         clickPoint.y -= cTopLeft.y;
 
-        CFTypeRef _cSize;
+        CFTypeRef _cSize = NULL;
         NSSize cSize;
         if (!(AXUIElementCopyAttributeValue((AXUIElementRef)_clickedWindow, (__bridge CFStringRef)NSAccessibilitySizeAttribute, &_cSize) == kAXErrorSuccess)
                 || !AXValueGetValue(_cSize, kAXValueCGSizeType, (void *)&cSize)) {
             NSLog(@"ERROR: Could not decode size");
-            return NULL;
+            if (_cSize != NULL) CFRelease(_cSize);
+            [moveResize setTracking:0];
+            [moveResize setWindow:NULL];
+            return event;
         }
         CFRelease(_cSize);
 

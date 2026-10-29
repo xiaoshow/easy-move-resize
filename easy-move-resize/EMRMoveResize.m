@@ -18,8 +18,11 @@
 }
 
 - init {
-    _window = nil;
-    _runLoopSource = nil;
+    self = [super init];
+    if (self) {
+        _window = nil;
+        _runLoopSource = nil;
+    }
     return self;
 }
 
@@ -45,6 +48,7 @@
 
 - (void)dealloc {
     if (_window != nil) CFRelease(_window);
+    if (_runLoopSource != nil) CFRelease(_runLoopSource);
 }
 
 @end
